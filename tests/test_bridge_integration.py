@@ -21,7 +21,7 @@ class MultiSigBridgeTest(unittest.TestCase):
     SCORE_INSTALL_ADDRESS = f"cx{'0' * 40}"
     GOV_SCORE_ADDRESS = "cx0000000000000000000000000000000000000001"
 
-    LOCAL_NETWORK_TEST = True
+    LOCAL_NETWORK_TEST = False
 
     LOCAL_TEST_HTTP_ENDPOINT_URI_V3 = "http://127.0.0.1:9000/api/v3"
     YEUOIDO_TEST_HTTP_ENDPOINT_URI_V3 = "https://bicon.net.solidwallet.io/api/v3"
@@ -37,7 +37,9 @@ class MultiSigBridgeTest(unittest.TestCase):
             cls._owners.append(KeyWallet.load("../../keystore_test1", "test1_Account"))
             cls._icon_service = IconService(HTTPProvider(cls.LOCAL_TEST_HTTP_ENDPOINT_URI_V3))
         else:
-            cls._owners.append(KeyWallet.load("../bridge_testing_wallet", "I_WONT_GIVE_YOU_MY_PASSWORD"))
+            yeouido_wallet_path = os.environ['TESTNET_WALLET_PATH']
+            yeouido_wallet_password = os.environ['TESTNET_WALLET_PASSWORD']
+            cls._owners.append(KeyWallet.load(yeouido_wallet_path, yeouido_wallet_password))
             cls._icon_service = IconService(HTTPProvider(cls.YEUOIDO_TEST_HTTP_ENDPOINT_URI_V3))
 
         for i in range(4):
@@ -124,7 +126,27 @@ class MultiSigBridgeTest(unittest.TestCase):
                       "Owner[2] is not wallet owner after adding him!")
 
     def testReplaceOwnerFail(self):
-        pass
+        tx_result = self._replaceOwner(from_=self._owners[0], old_owner=self._owners[1].get_address(), new_owner="hx0123456789abcde")
+        self.assertEqual(False, tx_result["status"],
+                         "Submitting replaceWalletOwner TX with faulty address should fail but does not!")
+
+        tx_result = self._replaceOwner(from_=self._owners[4], old_owner=self._owners[1].get_address(), new_owner=self._owners[2].get_address())
+        self.assertEqual(False, tx_result["status"],
+                         "Submitting replaceWalletOwner TX with non-owner as submitter should fail but does not!")
+
+        self._replaceOwner(from_=self._owners[0], old_owner=self._owners[1].get_address(), new_owner=self._owners[0].get_address())
+        tx_result = self._confirmLastTX(from_=self._owners[1])
+        self.assertIn("ExecutionFailure(int)", tx_result["eventLogs"][1]["indexed"],
+                      "Submitting replaceWalletOwner TX with already owner as new owner should fail but does not!")
+
+        self._replaceOwner(from_=self._owners[0], old_owner=self._owners[4].get_address(),
+                           new_owner=self._owners[2].get_address())
+        tx_result = self._confirmLastTX(from_=self._owners[1])
+        self.assertIn("ExecutionFailure(int)", tx_result["eventLogs"][1]["indexed"],
+                      "Submitting replaceWalletOwner TX with non-owner as old owner should fail but does not!")
+
+        self.assertNotIn(self._owners[2].get_address(), self._getWalletOwners(),
+                         "Owner[2] is wallet owner even though he was never added!")
 
     def testRemoveOwner(self):
         # Add an owner to remove one later
@@ -148,7 +170,60 @@ class MultiSigBridgeTest(unittest.TestCase):
                          "Owner[1] is still wallet owner after removing him!")
 
     def testRemoveOwnerFail(self):
-        pass
+        tx_result = self._removeOwner(from_=self._owners[0], owner="hx0123456789abcde")
+        self.assertEqual(False, tx_result["status"],
+                         "Submitting removeWalletOwner TX with faulty address should fail but does not!")
+
+        tx_result = self._removeOwner(from_=self._owners[4], owner=self._owners[1].get_address())
+        self.assertEqual(False, tx_result["status"],
+                         "Submitting removeWalletOwner TX with non-owner as submitter should fail but does not!")
+
+        self._removeOwner(from_=self._owners[0], owner=self._owners[2].get_address())
+        tx_result = self._confirmLastTX(from_=self._owners[1])
+        self.assertIn("ExecutionFailure(int)", tx_result["eventLogs"][1]["indexed"],
+                      "Submitting removeWalletOwner TX with non-owner as to be removed owner should fail but does not!")
+
+        self.assertIn(self._owners[1].get_address(), self._getWalletOwners(),
+                      "Owner[1] is not wallet owner even though he was never removed!")
+
+    def testChangeRequirement(self):
+        # Add an owner to be able to change the requirement
+        self._addOwner(from_=self._owners[0], new_owner=self._owners[2].get_address())
+        self._confirmLastTX(self._owners[1])
+
+        # Submit Change Requirement TX
+        tx_result = self._changeRequirement(from_=self._owners[0], required=3)
+
+        self.assertEqual(True, tx_result["status"], "Submitting changeRequirement TX should succeed but does not!")
+        self.assertEqual(2, self._getRequirement(), "Requirement should be 2 before changing it but is not!")
+
+        # Confirm Change Requirement Owner TX
+        tx_result = self._confirmLastTX(self._owners[1])
+        self.assertEqual(3, self._getRequirement(), "Requirement should be 3 after changing it but is not!")
+
+        # Add Owner and check that we need now 3 confirmations
+        self._addOwner(from_=self._owners[0], new_owner=self._owners[3].get_address())
+        self._confirmLastTX(self._owners[1])
+        self.assertNotIn(self._owners[3].get_address(), self._getWalletOwners(),
+                         "Owner[3] is wallet owner before adding him as an owner!")
+        self._confirmLastTX(self._owners[2])
+        self.assertIn(self._owners[3].get_address(), self._getWalletOwners(),
+                      "Owner[3] is not wallet owner after adding him as an owner!")
+
+    def testChangeRequirementFail(self):
+        self._changeRequirement(from_=self._owners[0], required=-6)
+        tx_result = self._confirmLastTX(from_=self._owners[1])
+        self.assertIn("ExecutionFailure(int)", tx_result["eventLogs"][1]["indexed"],
+                      "Submitting changeRequirement TX with negative requirement should fail but does not!")
+
+        self._changeRequirement(from_=self._owners[0], required=3)
+        tx_result = self._confirmLastTX(from_=self._owners[1])
+        self.assertIn("ExecutionFailure(int)", tx_result["eventLogs"][1]["indexed"],
+                      "Submitting changeRequirement TX with higher requirement than owners should fail but does not!")
+
+        tx_result = self._changeRequirement(from_=self._owners[4], required=1)
+        self.assertEqual(False, tx_result["status"],
+                         "Submitting changeRequirement TX with non-owner as submitter should fail but does not!")
 
     def testConfirmFail(self):
         tx = self._buildTransaction(type="write", from_=self._owners[0].get_address(), method="confirmTransaction",
@@ -292,6 +367,14 @@ class MultiSigBridgeTest(unittest.TestCase):
 
         return self._writeTX(params=params, from_=from_)
 
+    def _changeRequirement(self, from_: KeyWallet, required: int):
+        params = {"_destination": self._score_address,
+                  "_method": "changeRequirement",
+                  "_params": "[{\"name\":\"_required\",\"type\":\"int\",\"value\":\"" + str(required) + "\"}]",
+                  "_description": "remove owner from wallet"}
+
+        return self._writeTX(params=params, from_=from_)
+
     def _writeTX(self, params: dict, from_: KeyWallet) -> dict:
         tx = self._buildTransaction(type="write", from_=from_.get_address(), method="submitTransaction", params=params)
         signed_transaction = SignedTransaction(tx, from_)
@@ -321,6 +404,13 @@ class MultiSigBridgeTest(unittest.TestCase):
                                     params=params)
 
         return self._icon_service.call(tx)
+
+    def _getRequirement(self) -> int:
+        tx = self._buildTransaction(type="read", from_=self._owners[0].get_address(), method="getRequirement",
+                                    params={})
+
+        return int(self._icon_service.call(tx), 16)
+
 
 if __name__ == '__main__':
     unittest.main()
